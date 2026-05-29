@@ -9,6 +9,7 @@
 
 
 
+
 :root{--bg:#f4f4f5;--bg1:#fff;--bg2:#f8f8f9;--bg3:#f0f0f2;--bg4:#e4e4e7;--border:rgba(0,0,0,0.07);--border2:rgba(0,0,0,0.12);--text:#111;--text2:#555;--text3:#999;--green:#16a34a;--green-bg:rgba(22,163,74,0.08);--green-bd:rgba(22,163,74,0.22);--red:#dc2626;--red-bg:rgba(220,38,38,0.08);--red-bd:rgba(220,38,38,0.22);--amber:#d97706;--amber-bg:rgba(217,119,6,0.08);--amber-bd:rgba(217,119,6,0.22);--blue:#2563eb;--blue-bg:rgba(37,99,235,0.08);--blue-bd:rgba(37,99,235,0.22);--sans:system-ui,sans-serif;--mono:'Courier New',monospace}
 html.dark{--bg:#080808;--bg1:#0f0f0f;--bg2:#161616;--bg3:#1e1e1e;--bg4:#252525;--border:rgba(255,255,255,0.06);--border2:rgba(255,255,255,0.11);--text:#f5f5f5;--text2:#a0a0a0;--text3:#555;--green:#4ade80;--green-bg:rgba(74,222,128,0.08);--green-bd:rgba(74,222,128,0.22);--red:#f87171;--red-bg:rgba(248,113,113,0.08);--red-bd:rgba(248,113,113,0.22)}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -193,9 +194,11 @@ select.inp{cursor:pointer}
 
 
 
+
 </style>
 </head>
 <body>
+
 
 
 
@@ -655,7 +658,9 @@ select.inp{cursor:pointer}
 
 
 
+
 <script>
+
 
 
 
@@ -1124,7 +1129,8 @@ async function fhBatch(syms){
   for(var i=0;i<syms.length;i++){
     try{results.push(await fhQuote(syms[i]));}
     catch(e){console.warn("fhQuote failed:",syms[i],e.message);}
-    if(i<syms.length-1)await new Promise(function(r){setTimeout(r,120);});
+    // 300ms between calls to stay under Finnhub free tier rate limit (30 req/s)
+    if(i<syms.length-1)await new Promise(function(r){setTimeout(r,300);});
   }
   return results;
 }
@@ -1133,46 +1139,37 @@ async function yhBatch(syms){
   for(var i=0;i<syms.length;i++){
     try{results.push(await yhQuoteTSX(syms[i]));}
     catch(e){console.warn("yhQuote failed:",syms[i],e.message);}
-    if(i<syms.length-1)await new Promise(function(r){setTimeout(r,100);});
+    if(i<syms.length-1)await new Promise(function(r){setTimeout(r,300);});
   }
   return results;
 }
 
 async function yhQuoteTSX(sym){
-  // Yahoo Finance v8 — works from GitHub Pages (HTTPS origin, not null)
-  // Tries query1 then query2 as fallback, no User-Agent (causes CORS preflight)
-  var urls=[
-    "https://query1.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?interval=1d&range=5d",
-    "https://query2.finance.yahoo.com/v8/finance/chart/"+encodeURIComponent(sym)+"?interval=1d&range=5d"
-  ];
-  var d=null,lastErr="";
-  for(var i=0;i<urls.length;i++){
-    try{
-      var r=await fetch(urls[i],{mode:"cors",headers:{Accept:"application/json"}});
-      if(r.ok){d=await r.json();break;}
-      else lastErr="HTTP "+r.status;
-    }catch(e){lastErr=e.message;}
-  }
-  if(!d)throw new Error("Yahoo fetch failed for "+sym+": "+lastErr);
-  var result=d.chart&&d.chart.result&&d.chart.result[0];
-  if(!result)throw new Error("No Yahoo data for "+sym);
-  var meta=result.meta||{};
-  var price=meta.regularMarketPrice||meta.previousClose||0;
-  if(!price)throw new Error("No price in Yahoo response for "+sym);
-  var prev=meta.chartPreviousClose||meta.regularMarketPreviousClose||price;
-  var chg=prev?((price-prev)/prev*100):0;
-  return{
-    symbol:sym,
-    price:price,
-    changesPercentage:chg,
-    yearHigh:meta.fiftyTwoWeekHigh||null,
-    yearLow:meta.fiftyTwoWeekLow||null,
-    volume:meta.regularMarketVolume||null,
-    avgVolume:meta.averageDailyVolume10Day||null,
-    pe:null,eps:null,
-    name:meta.longName||meta.shortName||sym
-  };
+  // Yahoo Finance has no CORS headers - blocked everywhere
+  // Use Finnhub TSX:SYM format instead - works from any origin
+  var key=getFHKey();
+  if(!key)throw new Error("Add Finnhub key in Settings");
+  var bare=sym.replace(".TO","");
+  var fhSym="TSX:"+bare;
+  // Fetch quote
+  var r=await fetch("https://finnhub.io/api/v1/quote?symbol="+encodeURIComponent(fhSym)+"&token="+key,{headers:{Accept:"application/json"}});
+  if(!r.ok)throw new Error("Finnhub TSX "+r.status+" for "+sym);
+  var d=await r.json();
+  if(d&&d.error)throw new Error(d.error);
+  var price=d.c||d.pc||0;
+  if(!price)throw new Error("No price for "+fhSym);
+  var prev=d.pc||price;
+  var chg=prev&&d.c?((d.c-prev)/prev*100):0;
+  // Fetch metrics for 52w high/low (separate call with delay)
+  var yearHigh=null,yearLow=null;
+  await new Promise(function(r2){setTimeout(r2,250);});
+  try{
+    var mr=await fetch("https://finnhub.io/api/v1/stock/metric?symbol="+encodeURIComponent(fhSym)+"&metric=all&token="+key,{headers:{Accept:"application/json"}});
+    if(mr.ok){var md=await mr.json();var met=(md&&md.metric)||{};yearHigh=met["52WeekHigh"]||null;yearLow=met["52WeekLow"]||null;}
+  }catch(e2){}
+  return{symbol:sym,price:price,changesPercentage:chg,yearHigh:yearHigh,yearLow:yearLow,volume:d.v||null,avgVolume:null,pe:null,eps:null,name:sym};
 }
+
 // FMP — used for richer data when key present
 function fmpFetch(ep){
   var sep=ep.includes("?")?"&":"?";
@@ -1195,8 +1192,8 @@ async function refreshAll(){
 }
 async function loadPulse(){
   var pg=document.getElementById("pulseGrid");
-  var lbls=["S&P 500","NASDAQ 100","SOX Semis","VIX Proxy","USD/CAD"];
-  var syms=["SPY","QQQ","SOXX","UVXY","CAD=X"];
+  var lbls=["S&P 500","NASDAQ 100","SOX Semis","VIX","NVDA"];
+  var syms=["SPY","QQQ","SOXX","^VIX","NVDA"];
   function render(d){
     pg.innerHTML=lbls.map(function(lbl,i){
       var q=d.find(function(x){return x.symbol===syms[i];})||{};
@@ -2381,6 +2378,7 @@ if(document.readyState==="loading"){
   init();
 }
 })();
+
 
 
 
